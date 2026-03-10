@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Touch Blocker</string>
+    <string name="accessibility_description">Защита устройства от несанкционированного доступа</string>
+</resources>
